@@ -5,7 +5,7 @@ Author: Shreekar V J | USN: ENG24CS0220 | Section: 5D
 
 Run locally:
     pip install flask requests
-    $env:HF_TOKEN="hf_xxxxxxxxxxxxxxxxxxxxxxxxx"  # (PowerShell)
+    $env:HF_TOKEN="your_token_here"
     python app.py
 Then open http://127.0.0.1:5000 in your browser.
 """
@@ -22,8 +22,8 @@ from flask import Flask, jsonify, render_template_string, request
 
 app = Flask(__name__)
 
-# Hugging Face Inference API (Router) & fine-tuned BERT phishing model
-HF_MODEL_ID = "ealvaradob/bert-finetuned-phishing"
+# Hugging Face Inference API (Router) — officially supported warm zero-shot model
+HF_MODEL_ID = "facebook/bart-large-mnli"
 HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL_ID}"
 SAMPLES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_messages.json")
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scan_results.json")
@@ -144,12 +144,18 @@ def extract_red_flags(text: str) -> list[str]:
 
 
 def classify_with_huggingface(text: str, token: str, retries: int = 2) -> dict:
-    """Send text to Hugging Face Cloud Inference API and return normalized score."""
+    """Send text to Hugging Face Cloud Inference API (Zero-Shot BART-MNLI) and return score."""
     headers = {
         "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
     }
-    payload = {"inputs": text}
+    payload = {
+        "inputs": text,
+        "parameters": {
+            "candidate_labels": ["phishing scam", "legitimate message"],
+            "multi_label": False,
+        },
+    }
 
     for attempt in range(retries + 1):
         response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=25)
@@ -162,27 +168,31 @@ def classify_with_huggingface(text: str, token: str, retries: int = 2) -> dict:
             time.sleep(wait_sec)
             continue
 
-        response.raise_for_status()
+        if not response.ok:
+            raise RuntimeError(f"HTTP {response.status_code}")
+
         data = response.json()
-        candidates = data[0] if isinstance(data, list) and data and isinstance(data[0], list) else data
+        phishing_prob = 0.5
 
-        scores = {}
-        for item in candidates:
-            lbl = str(item.get("label", "")).lower()
-            sc = float(item.get("score", 0.0))
-            if lbl in ("phishing", "label_1", "spam", "fraud"):
-                scores["phishing"] = sc
-            else:
-                scores["benign"] = sc
+        # Handle both list-of-dicts ([{'label': ..., 'score': ...}]) and dict ({'labels': [...], 'scores': [...]})
+        if isinstance(data, list):
+            for item in data:
+                if "phishing" in str(item.get("label", "")).lower():
+                    phishing_prob = float(item.get("score", 0.5))
+                    break
+        elif isinstance(data, dict) and "labels" in data and "scores" in data:
+            for lbl, sc in zip(data["labels"], data["scores"]):
+                if "phishing" in str(lbl).lower():
+                    phishing_prob = float(sc)
+                    break
 
-        phishing_prob = scores.get("phishing", 1.0 - scores.get("benign", 0.5))
         return {
             "source": "Hugging Face Cloud Inference API",
             "model": HF_MODEL_ID,
             "phishing_probability": round(phishing_prob * 100, 2),
         }
 
-    raise RuntimeError("Hugging Face Inference API did not return a valid response.")
+    raise RuntimeError("No response from Hugging Face Inference API")
 
 
 def local_fallback_score(flags: list[str], reason: str = "HF_TOKEN not set") -> dict:
@@ -210,8 +220,8 @@ def analyze_message(text: str, custom_token: str | None = None) -> dict:
     if token:
         try:
             ai_result = classify_with_huggingface(text, token)
-        except requests.RequestException as exc:
-            ai_result = local_fallback_score(flags, reason=f"Cloud error: {type(exc).__name__}")
+        except Exception as exc:
+            ai_result = local_fallback_score(flags, reason=f"Cloud error: {exc}")
     else:
         ai_result = local_fallback_score(flags)
 
@@ -405,7 +415,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <header>
-    <div class="brand">PhishGuard AI <span>Cloud BERT</span></div>
+    <div class="brand">PhishGuard AI <span>Cloud AI</span></div>
     <nav>
       <button id="tab-scanner" class="active" onclick="switchTab('scanner')">Scanner</button>
       <button id="tab-history" onclick="switchTab('history')">Scan History (<span id="hist-count">0</span>)</button>
@@ -427,7 +437,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <button class="btn-secondary" onclick="clearInput()">Clear</button>
           </div>
           <span class="status-note" id="cloud-status">
-            {% if env_token_set %}Cloud Status: HF_TOKEN configured{% else %}Cloud Status: Set HF_TOKEN in terminal or Cloud API Setup tab{% endif %}
+            {% if env_token_set %}Cloud Status: HF_TOKEN configured{% else %}Cloud Status: Set HF_TOKEN in environment or Cloud API Setup tab{% endif %}
           </span>
         </div>
       </div>
@@ -451,7 +461,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <section id="view-history" class="hidden">
       <h1>Scan History</h1>
-      <p class="subtitle">Recent scans logged during this session (also saved to <code>scan_results.json</code>).</p>
+      <p class="subtitle">Recent scans logged during this session (also saved to <code>scan_results.json</code> when running locally).</p>
       <div class="card" id="history-container">
         <p class="status-note">No messages scanned yet.</p>
       </div>
@@ -459,16 +469,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <section id="view-settings" class="hidden">
       <h1>Cloud API Configuration</h1>
-      <p class="subtitle">Optional: paste your Hugging Face Access Token here if you did not set <code>HF_TOKEN</code> in your terminal.</p>
+      <p class="subtitle">Optional: paste your Hugging Face Access Token here if you did not set <code>HF_TOKEN</code> in environment variables.</p>
       <div class="card">
-        <label for="token-input" style="display:block; font-size:13px; font-weight:600; margin-bottom:6px;">Hugging Face Token (hf_...)</label>
-        <input id="token-input" type="password" placeholder="hf_xxxxxxxxxxxxxxxxxxxxxxxxx" />
-        <p class="status-note" style="margin-top:8px;">Used only for live HTTPS calls to <code>router.huggingface.co/hf-inference/models/ealvaradob/bert-finetuned-phishing</code>.</p>
+        <label for="token-input" style="display:block; font-size:13px; font-weight:600; margin-bottom:6px;">Hugging Face Access Token</label>
+        <input id="token-input" type="password" placeholder="Paste your Hugging Face token here" />
+        <p class="status-note" style="margin-top:8px;">Used only for live HTTPS calls to <code>router.huggingface.co/hf-inference/models/facebook/bart-large-mnli</code>.</p>
       </div>
     </section>
 
     <footer>
-      CAT-03 Cloud Computing Case Study — Shreekar V J (ENG24CS0220, Section 5D) • Powered by Hugging Face Inference API
+      PhishGuard AI — Shreekar V J (ENG24CS0220) • Powered by Hugging Face Inference API
     </footer>
   </main>
 
