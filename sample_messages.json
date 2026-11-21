@@ -1,0 +1,27 @@
+[
+  {
+    "id": 1,
+    "category": "Bank KYC Phishing SMS",
+    "message": "URGENT: Your SBI bank account has been suspended due to incomplete KYC. Verify your OTP and PAN details immediately within 24 hours at http://sbi-kyc-verify.example.com/login to avoid permanent block."
+  },
+  {
+    "id": 2,
+    "category": "Delivery Scam SMS",
+    "message": "Your parcel delivery failed due to an incomplete address. Update your details now to reschedule: https://bit.ly/3xFakeParcel"
+  },
+  {
+    "id": 3,
+    "category": "Prize / Crypto Scam",
+    "message": "Congratulations! You won a 50,000 INR reward in our crypto lucky draw. Share your bank details and CVV to claim your prize immediately!"
+  },
+  {
+    "id": 4,
+    "category": "Legitimate University Notice",
+    "message": "Reminder from the CSE Department: CAT-03 case study demonstrations and report submissions are scheduled for Monday, 23 November 2026 between 10:00 AM and 3:00 PM."
+  },
+  {
+    "id": 5,
+    "category": "Legitimate Bank Alert",
+    "message": "Rs. 450.00 debited from A/C XX1234 via UPI on 19-11-26. If you did not authorize this transaction, call 1800-11-2211."
+  }
+]
