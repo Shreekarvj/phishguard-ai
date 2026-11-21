@@ -23,9 +23,8 @@ app = Flask(__name__)
 
 # Google Gemini Developer API (Google AI Studio) — tries active free-tier Flash models in order
 GEMINI_MODELS = [
-    "gemini-3.5-flash-lite",
-    "gemini-3.1-flash-lite",
     "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
 ]
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 SAMPLES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_messages.json")
@@ -162,12 +161,12 @@ def classify_with_gemini(text: str, api_key: str) -> dict:
         "Content-Type": "application/json",
         "x-goog-api-key": api_key,
     }
- payload = {
+    payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "temperature": 0.1,
-            "maxOutputTokens": 256,
+            "maxOutputTokens": 200,
             "thinkingConfig": {"thinkingLevel": "LOW"},
         },
     }
