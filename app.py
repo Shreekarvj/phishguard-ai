@@ -1,11 +1,11 @@
 """
 Real-Time Phishing & Scam Message Detector — Web Application
-CAT-03 Case Study: Using an AI-Enabled Cloud Tool (Hugging Face Inference API)
+CAT-03 Case Study: Using an AI-Enabled Cloud Tool (Google Gemini API)
 Author: Shreekar V J | USN: ENG24CS0220 | Section: 5D
 
 Run locally:
     pip install flask requests
-    $env:HF_TOKEN="your_token_here"
+    $env:GEMINI_API_KEY="your_api_key_here"
     python app.py
 Then open http://127.0.0.1:5000 in your browser.
 """
@@ -13,7 +13,6 @@ Then open http://127.0.0.1:5000 in your browser.
 import json
 import os
 import re
-import time
 from datetime import datetime
 from urllib.parse import urlparse
 
@@ -22,9 +21,13 @@ from flask import Flask, jsonify, render_template_string, request
 
 app = Flask(__name__)
 
-# Hugging Face Inference API (Router) — officially supported warm zero-shot model
-HF_MODEL_ID = "facebook/bart-large-mnli"
-HF_API_URL = f"https://router.huggingface.co/hf-inference/models/{HF_MODEL_ID}"
+# Google Gemini Developer API (Google AI Studio) — tries active free-tier Flash models in order
+GEMINI_MODELS = [
+    "gemini-3.6-flash",
+    "gemini-3.5-flash-lite",
+    "gemini-3.1-flash-lite",
+]
+GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 SAMPLES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_messages.json")
 LOG_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scan_results.json")
 
@@ -143,65 +146,76 @@ def extract_red_flags(text: str) -> list[str]:
     return flags
 
 
-def classify_with_huggingface(text: str, token: str, retries: int = 2) -> dict:
-    """Send text to Hugging Face Cloud Inference API (Zero-Shot BART-MNLI) and return score."""
+def classify_with_gemini(text: str, api_key: str) -> dict:
+    """Send message to Google Gemini Cloud API and parse structured JSON verdict."""
+    prompt = (
+        "You are a cybersecurity phishing detector. Analyze the following SMS, email, or URL message "
+        "and respond ONLY with a valid JSON object using these exact keys:\n"
+        '{"phishing_probability": <number 0 to 100>, '
+        '"explanation": "<one concise sentence explaining why>", '
+        '"red_flags": ["<short red flag 1>", "<short red flag 2>"]}\n'
+        "If the message is legitimate and safe, set phishing_probability below 20 and red_flags to [].\n\n"
+        f"Message:\n{text}"
+    )
+
     headers = {
-        "Authorization": f"Bearer {token}",
         "Content-Type": "application/json",
+        "x-goog-api-key": api_key,
     }
     payload = {
-        "inputs": text,
-        "parameters": {
-            "candidate_labels": ["phishing scam", "legitimate message"],
-            "multi_label": False,
+        "contents": [{"parts": [{"text": prompt}]}],
+        "generationConfig": {
+            "responseMimeType": "application/json",
+            "temperature": 0.1,
         },
     }
 
-    for attempt in range(retries + 1):
-        response = requests.post(HF_API_URL, headers=headers, json=payload, timeout=25)
-        if response.status_code == 503 and attempt < retries:
-            wait_sec = 5
-            try:
-                wait_sec = min(int(response.json().get("estimated_time", 5)), 15)
-            except ValueError:
-                pass
-            time.sleep(wait_sec)
+    last_error = "Unknown error"
+    for model_name in GEMINI_MODELS:
+        url = f"{GEMINI_BASE_URL}/{model_name}:generateContent"
+        response = requests.post(url, headers=headers, json=payload, timeout=20)
+        if response.status_code in (404, 429, 503):
+            last_error = f"HTTP {response.status_code}"
             continue
-
         if not response.ok:
             raise RuntimeError(f"HTTP {response.status_code}")
 
-        data = response.json()
-        phishing_prob = 0.5
+        body = response.json()
+        raw_text = (
+            body.get("candidates", [{}])[0]
+            .get("content", {})
+            .get("parts", [{}])[0]
+            .get("text", "{}")
+            .strip()
+        )
+        # Strip markdown fences if present
+        raw_text = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw_text, flags=re.S).strip()
+        parsed = json.loads(raw_text)
 
-        # Handle both list-of-dicts ([{'label': ..., 'score': ...}]) and dict ({'labels': [...], 'scores': [...]})
-        if isinstance(data, list):
-            for item in data:
-                if "phishing" in str(item.get("label", "")).lower():
-                    phishing_prob = float(item.get("score", 0.5))
-                    break
-        elif isinstance(data, dict) and "labels" in data and "scores" in data:
-            for lbl, sc in zip(data["labels"], data["scores"]):
-                if "phishing" in str(lbl).lower():
-                    phishing_prob = float(sc)
-                    break
+        prob = max(0.0, min(100.0, float(parsed.get("phishing_probability", 50.0))))
+        explanation = str(parsed.get("explanation", "")).strip()
+        ai_flags = [str(f).strip() for f in parsed.get("red_flags", []) if str(f).strip()]
 
         return {
-            "source": "Hugging Face Cloud Inference API",
-            "model": HF_MODEL_ID,
-            "phishing_probability": round(phishing_prob * 100, 2),
+            "source": "Google Gemini API (Google AI Studio)",
+            "model": model_name,
+            "phishing_probability": round(prob, 2),
+            "explanation": explanation,
+            "ai_flags": ai_flags,
         }
 
-    raise RuntimeError("No response from Hugging Face Inference API")
+    raise RuntimeError(last_error)
 
 
-def local_fallback_score(flags: list[str], reason: str = "HF_TOKEN not set") -> dict:
-    """Fallback heuristic score used only when cloud token is absent or unreachable."""
+def local_fallback_score(flags: list[str], reason: str = "GEMINI_API_KEY not set") -> dict:
+    """Fallback heuristic score used only when API key is absent or unreachable."""
     score = min(15.0 + len(flags) * 25.0, 95.0) if flags else 8.0
     return {
         "source": f"Local Heuristic Fallback ({reason})",
         "model": "Rule-Based Scanner",
         "phishing_probability": round(score, 2),
+        "explanation": "Evaluated using local regex heuristics because the cloud API was not configured or unreachable.",
+        "ai_flags": [],
     }
 
 
@@ -213,19 +227,22 @@ def determine_verdict(phishing_prob: float, flags: list[str]) -> str:
     return "SAFE / LEGITIMATE"
 
 
-def analyze_message(text: str, custom_token: str | None = None) -> dict:
-    flags = extract_red_flags(text)
-    token = (custom_token or "").strip() or os.environ.get("HF_TOKEN", "").strip()
+def analyze_message(text: str, custom_key: str | None = None) -> dict:
+    local_flags = extract_red_flags(text)
+    api_key = (custom_key or "").strip() or os.environ.get("GEMINI_API_KEY", "").strip()
 
-    if token:
+    if api_key:
         try:
-            ai_result = classify_with_huggingface(text, token)
+            ai_result = classify_with_gemini(text, api_key)
         except Exception as exc:
-            ai_result = local_fallback_score(flags, reason=f"Cloud error: {exc}")
+            ai_result = local_fallback_score(local_flags, reason=f"Cloud error: {exc}")
     else:
-        ai_result = local_fallback_score(flags)
+        ai_result = local_fallback_score(local_flags)
 
-    verdict = determine_verdict(ai_result["phishing_probability"], flags)
+    # Merge AI-detected red flags with local heuristic flags (deduplicated)
+    combined_flags = list(dict.fromkeys(ai_result.get("ai_flags", []) + local_flags))
+    verdict = determine_verdict(ai_result["phishing_probability"], combined_flags)
+
     record = {
         "timestamp": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
         "message": text,
@@ -234,7 +251,8 @@ def analyze_message(text: str, custom_token: str | None = None) -> dict:
         "phishing_probability_pct": ai_result["phishing_probability"],
         "inference_source": ai_result["source"],
         "model": ai_result["model"],
-        "red_flags": flags,
+        "explanation": ai_result.get("explanation", ""),
+        "red_flags": combined_flags,
     }
     SCAN_HISTORY.insert(0, record)
     try:
@@ -397,6 +415,15 @@ HTML_TEMPLATE = """<!DOCTYPE html>
       font-size: 13px;
       color: #374151;
     }
+    .explanation-box {
+      background: #f8fafc;
+      border-left: 3px solid #2563eb;
+      padding: 10px 12px;
+      font-size: 14px;
+      color: #1f2937;
+      margin: 10px 0;
+      border-radius: 4px;
+    }
     .flags-list { margin-left: 18px; font-size: 14px; color: #374151; }
     .flags-list li { margin-bottom: 4px; }
     .hidden { display: none; }
@@ -415,7 +442,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 </head>
 <body>
   <header>
-    <div class="brand">PhishGuard AI <span>Cloud AI</span></div>
+    <div class="brand">PhishGuard AI <span>Gemini Cloud</span></div>
     <nav>
       <button id="tab-scanner" class="active" onclick="switchTab('scanner')">Scanner</button>
       <button id="tab-history" onclick="switchTab('history')">Scan History (<span id="hist-count">0</span>)</button>
@@ -426,7 +453,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
   <main>
     <section id="view-scanner">
       <h1>Phishing &amp; Scam Message Detector</h1>
-      <p class="subtitle">Paste a suspicious email, SMS, or URL — or click a sample below — to classify it using the Hugging Face Cloud Inference API.</p>
+      <p class="subtitle">Paste a suspicious email, SMS, or URL — or click a sample below — to classify it using the Google Gemini Cloud API.</p>
 
       <div class="card">
         <div class="samples-row" id="samples-container"></div>
@@ -437,7 +464,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
             <button class="btn-secondary" onclick="clearInput()">Clear</button>
           </div>
           <span class="status-note" id="cloud-status">
-            {% if env_token_set %}Cloud Status: HF_TOKEN configured{% else %}Cloud Status: Set HF_TOKEN in environment or Cloud API Setup tab{% endif %}
+            {% if env_key_set %}Cloud Status: GEMINI_API_KEY configured{% else %}Cloud Status: Set GEMINI_API_KEY in environment or Cloud API Setup tab{% endif %}
           </span>
         </div>
       </div>
@@ -452,6 +479,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
           <div><strong>Cloud Service:</strong> <span id="res-source"></span></div>
           <div><strong>AI Model:</strong> <span id="res-model"></span></div>
         </div>
+        <div id="res-explanation" class="explanation-box hidden"></div>
         <div style="margin-top:10px;">
           <strong style="font-size:14px;">Detected Red Flags:</strong>
           <ul id="res-flags" class="flags-list" style="margin-top:6px;"></ul>
@@ -469,16 +497,16 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
     <section id="view-settings" class="hidden">
       <h1>Cloud API Configuration</h1>
-      <p class="subtitle">Optional: paste your Hugging Face Access Token here if you did not set <code>HF_TOKEN</code> in environment variables.</p>
+      <p class="subtitle">Optional: paste your Google Gemini API key here if you did not set <code>GEMINI_API_KEY</code> in environment variables.</p>
       <div class="card">
-        <label for="token-input" style="display:block; font-size:13px; font-weight:600; margin-bottom:6px;">Hugging Face Access Token</label>
-        <input id="token-input" type="password" placeholder="Paste your Hugging Face token here" />
-        <p class="status-note" style="margin-top:8px;">Used only for live HTTPS calls to <code>router.huggingface.co/hf-inference/models/facebook/bart-large-mnli</code>.</p>
+        <label for="token-input" style="display:block; font-size:13px; font-weight:600; margin-bottom:6px;">Google Gemini API Key</label>
+        <input id="token-input" type="password" placeholder="Paste your Google AI Studio API key here" />
+        <p class="status-note" style="margin-top:8px;">Used only for live HTTPS calls to the Google Gemini Developer API (<code>generativelanguage.googleapis.com</code>).</p>
       </div>
     </section>
 
     <footer>
-      PhishGuard AI — Shreekar V J (ENG24CS0220) • Powered by Hugging Face Inference API
+      PhishGuard AI — Shreekar V J (ENG24CS0220) • Powered by Google Gemini API
     </footer>
   </main>
 
@@ -527,7 +555,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
     async function analyzeMessage() {
       const text = document.getElementById('msg-input').value.trim();
       if (!text) return alert('Please paste or select a message first.');
-      const token = document.getElementById('token-input').value.trim();
+      const apiKey = document.getElementById('token-input').value.trim();
       const btn = document.getElementById('analyze-btn');
       btn.disabled = true;
       btn.textContent = 'Analyzing...';
@@ -536,7 +564,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         const res = await fetch('/api/analyze', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, token })
+          body: JSON.stringify({ text, api_key: apiKey })
         });
         const data = await res.json();
         document.getElementById('result-card').classList.remove('hidden');
@@ -550,10 +578,18 @@ HTML_TEMPLATE = """<!DOCTYPE html>
         document.getElementById('res-source').textContent = data.inference_source;
         document.getElementById('res-model').textContent = data.model;
 
+        const expBox = document.getElementById('res-explanation');
+        if (data.explanation) {
+          expBox.textContent = 'AI Analysis: ' + data.explanation;
+          expBox.classList.remove('hidden');
+        } else {
+          expBox.classList.add('hidden');
+        }
+
         const ul = document.getElementById('res-flags');
         ul.innerHTML = '';
         if (data.red_flags.length === 0) {
-          ul.innerHTML = '<li>No heuristic red flags detected.</li>';
+          ul.innerHTML = '<li>No red flags detected.</li>';
         } else {
           data.red_flags.forEach(f => {
             const li = document.createElement('li');
@@ -600,7 +636,7 @@ HTML_TEMPLATE = """<!DOCTYPE html>
 
 @app.route("/")
 def index():
-    return render_template_string(HTML_TEMPLATE, env_token_set=bool(os.environ.get("HF_TOKEN")))
+    return render_template_string(HTML_TEMPLATE, env_key_set=bool(os.environ.get("GEMINI_API_KEY")))
 
 
 @app.route("/api/samples")
@@ -614,8 +650,8 @@ def api_analyze():
     text = str(body.get("text", "")).strip()
     if not text:
         return jsonify({"error": "Message text is required."}), 400
-    custom_token = body.get("token")
-    result = analyze_message(text, custom_token=custom_token)
+    custom_key = body.get("api_key") or body.get("token")
+    result = analyze_message(text, custom_key=custom_key)
     return jsonify(result)
 
 
