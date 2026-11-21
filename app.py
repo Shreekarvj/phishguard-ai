@@ -23,9 +23,9 @@ app = Flask(__name__)
 
 # Google Gemini Developer API (Google AI Studio) — tries active free-tier Flash models in order
 GEMINI_MODELS = [
-    "gemini-3.6-flash",
     "gemini-3.5-flash-lite",
     "gemini-3.1-flash-lite",
+    "gemini-3.6-flash",
 ]
 GEMINI_BASE_URL = "https://generativelanguage.googleapis.com/v1beta/models"
 SAMPLES_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "sample_messages.json")
@@ -162,19 +162,25 @@ def classify_with_gemini(text: str, api_key: str) -> dict:
         "Content-Type": "application/json",
         "x-goog-api-key": api_key,
     }
-    payload = {
+ payload = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
             "responseMimeType": "application/json",
             "temperature": 0.1,
+            "maxOutputTokens": 256,
+            "thinkingConfig": {"thinkingLevel": "LOW"},
         },
     }
 
     last_error = "Unknown error"
     for model_name in GEMINI_MODELS:
         url = f"{GEMINI_BASE_URL}/{model_name}:generateContent"
-        response = requests.post(url, headers=headers, json=payload, timeout=20)
-        if response.status_code in (404, 429, 503):
+        try:
+            response = requests.post(url, headers=headers, json=payload, timeout=12)
+        except requests.Timeout:
+            last_error = f"{model_name} timed out"
+            continue
+        if response.status_code in (400, 404, 429, 503):
             last_error = f"HTTP {response.status_code}"
             continue
         if not response.ok:
